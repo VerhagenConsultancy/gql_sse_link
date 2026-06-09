@@ -1,0 +1,78 @@
+# gql_sse_link
+
+[![pub package][pub-badge]][pub-link]
+[![MIT License][license-badge]][license-link]
+[![PRs Welcome][prs-badge]][prs-link]
+[![Star on GitHub][github-star-badge]][github-star-link]
+
+[pub-badge]: https://img.shields.io/pub/v/gql_sse_link.svg?style=for-the-badge
+[pub-link]: https://pub.dev/packages/gql_sse_link
+[license-badge]: https://img.shields.io/github/license/VerhagenConsultancy/gql_sse_link.svg?style=for-the-badge
+[license-link]: https://github.com/VerhagenConsultancy/gql_sse_link/blob/main/LICENSE
+[prs-badge]: https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=for-the-badge
+[prs-link]: https://github.com/VerhagenConsultancy/gql_sse_link/issues
+[github-star-badge]: https://img.shields.io/github/stars/VerhagenConsultancy/gql_sse_link.svg?style=for-the-badge&logo=github&logoColor=ffffff
+[github-star-link]: https://github.com/VerhagenConsultancy/gql_sse_link/stargazers
+
+GQL link to execute GraphQL **subscriptions** over Server-Sent Events
+using the [graphql-sse "distinct connections" protocol][graphql-sse-spec].
+
+`SseLink` is a terminating link that specialises in subscriptions. Queries
+and mutations should be routed to a different terminating link (typically
+`HttpLink`) via `Link.split`.
+
+## Usage
+
+```dart
+import "package:gql_exec/gql_exec.dart";
+import "package:gql_http_link/gql_http_link.dart";
+import "package:gql_link/gql_link.dart";
+import "package:gql_sse_link/gql_sse_link.dart";
+
+void main() {
+  final link = Link.split(
+    (request) =>
+        request.operation.getOperationType() == OperationType.subscription,
+    SseLink("https://example.com/graphql/stream"),
+    HttpLink("https://example.com/graphql"),
+  );
+}
+```
+
+### HTTP/2 and HTTP/3
+
+The SSE endpoint is called via `package:http`, which defaults to `dart:io`'s
+`HttpClient` on io platforms — HTTP/1.1 only. To get HTTP/2 or HTTP/3
+(connection multiplexing, QUIC), inject a different `http.Client`:
+
+| Platform      | Client                                           | Protocols         |
+| ------------- | ------------------------------------------------ | ----------------- |
+| Android       | [`cronet_http`](https://pub.dev/packages/cronet_http) | HTTP/1, HTTP/2, HTTP/3 |
+| iOS/macOS     | [`cupertino_http`](https://pub.dev/packages/cupertino_http) | HTTP/1, HTTP/2, HTTP/3 (iOS 15+) |
+| Web           | browser (fetch)                                  | HTTP/1, HTTP/2, HTTP/3 |
+
+```dart
+SseLink(
+  "https://example.com/graphql/stream",
+  httpClient: CronetClient.defaultCronetEngine(),
+);
+```
+
+## Protocol notes
+
+This link implements the **distinct connections mode** of
+[graphql-sse][graphql-sse-spec]: each subscription is a single `POST`
+with `Accept: text/event-stream` whose response is a stream of SSE
+events:
+
+- `event: next`  — `data:` is a GraphQL `ExecutionResult`. Parsed via
+  the standard `ResponseParser` and emitted on the link's response
+  stream.
+- `event: complete` — closes the response stream.
+
+The **single connection mode** (reservation tokens + multiplexed
+operations) is not implemented. With HTTP/2 or HTTP/3, distinct
+connections multiplex over a single transport connection anyway, so
+there is no meaningful overhead.
+
+[graphql-sse-spec]: https://github.com/enisdenjo/graphql-sse/blob/master/PROTOCOL.md
