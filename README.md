@@ -63,6 +63,61 @@ SseLink(
 );
 ```
 
+## Reconnection
+
+Subscriptions are long-lived, so the underlying connection can drop
+mid-stream — the OS stalls the app/tab, the server closes the stream, or the
+network blips. When that happens the transport either errors (on web:
+`ClientException: Error in input stream`) or the stream simply ends without an
+`event: complete`. `SseLink` treats both as transient: it transparently
+re-issues the `POST` in the background with exponential backoff, so consumers
+see **one continuous response stream that does not error on a transient drop**.
+No changes are needed downstream.
+
+Terminal conditions are not retried:
+
+- An explicit `event: complete` closes the stream for good.
+- Deterministic failures propagate as errors instead of spinning forever:
+  HTTP `4xx` (e.g. `400`/`401`/`403`), malformed `next` payloads
+  (`SseLinkParserException`), and request-format/context errors.
+
+Transient failures are retried: network errors, dropped/aborted streams, and
+HTTP `5xx`.
+
+Cancelling the subscription (e.g. navigating away) aborts the in-flight HTTP
+response cleanly and silently — no aborted-stream error escapes to the zone.
+
+### Configuration
+
+The policy is configurable via optional constructor parameters, modelled on
+[`gql_websocket_link`](https://pub.dev/packages/gql_websocket_link). The
+public API is backward compatible; the defaults suit live subscriptions.
+
+| Parameter                | Type                              | Default                          | Description |
+| ------------------------ | --------------------------------- | -------------------------------- | ----------- |
+| `retryAttempts`          | `int`                             | `SseLink.unlimitedRetries` (`-1`) | Max consecutive reconnects before the stream errors out. `-1` reconnects indefinitely. The counter resets after a connection stays healthy for `retryHealthyThreshold`. |
+| `retryWait`              | `Future<void> Function(int retries)` | `SseLink.randomizedExponentialBackoff` | Backoff schedule; awaited before each reconnect. `retries` starts at `0` for the first reconnect after a healthy connection. |
+| `shouldRetry`            | `bool Function(Object error)`     | `SseLink.shouldRetryDefault`     | Classifies a transport failure as transient (`true` → reconnect) or deterministic (`false` → propagate). |
+| `retryHealthyThreshold`  | `Duration`                        | `Duration(seconds: 30)`          | Once a connection has stayed open this long, the next drop restarts the backoff from its first step. |
+
+```dart
+SseLink(
+  "https://example.com/graphql/stream",
+  // Stop after 10 consecutive failed reconnects instead of retrying forever.
+  retryAttempts: 10,
+  // Custom backoff: fixed 5s between attempts.
+  retryWait: (retries) => Future<void>.delayed(const Duration(seconds: 5)),
+);
+```
+
+The default `randomizedExponentialBackoff` starts at a 1s base delay, doubles
+per attempt up to a 30s cap, and adds a random 300ms–3s jitter.
+
+> **Non-goal — `Last-Event-ID` resumption.** The distinct-connections mode
+> re-executes the subscription from scratch on every connection, and these
+> subscriptions stream full current state on each event, so a plain re-`POST`
+> is sufficient. The link does not send `Last-Event-ID`.
+
 ## Protocol notes
 
 This link implements the **distinct connections mode** of
