@@ -1,5 +1,5 @@
 name: gql_sse_link
-version: 1.0.0-beta.2
+version: 1.0.0-beta.3
 description: GQL terminating Link to execute GraphQL subscriptions over Server-Sent Events (graphql-sse "distinct connections" protocol).
 repository: https://github.com/VerhagenConsultancy/gql_sse_link
 issue_tracker: https://github.com/VerhagenConsultancy/gql_sse_link/issues

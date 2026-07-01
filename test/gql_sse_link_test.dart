@@ -42,10 +42,14 @@ class _ReconnectClient extends http.BaseClient {
   final List<StreamController<List<int>>> conns =
       <StreamController<List<int>>>[];
 
+  /// The request sent for each connection, in order.
+  final List<http.BaseRequest> requests = <http.BaseRequest>[];
+
   int get calls => conns.length;
 
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    requests.add(request);
     final index = conns.length;
     final controller = StreamController<List<int>>();
     if (onCancel != null) {
@@ -640,6 +644,76 @@ void main() {
         expect(client.calls, 3);
         expect(error, isA<SseLinkServerException>());
         expect(done, isTrue);
+      });
+    });
+
+    test("applies connectionParams headers, refreshed on each reconnect", () {
+      fakeAsync((async) {
+        var token = "t1";
+        final client = _ReconnectClient();
+        final link = SseLink(
+          "https://example.com/graphql/stream",
+          httpClient: client,
+          retryWait: _immediate,
+          defaultHeaders: const <String, String>{"Authorization": "stale"},
+          connectionParams: () async =>
+              <String, String>{"Authorization": "Bearer $token"},
+        );
+
+        final sub = link.request(_subscription()).listen((_) {});
+        async.flushMicrotasks();
+
+        // connectionParams overrides defaultHeaders on the first connection.
+        expect(client.requests[0].headers["Authorization"], "Bearer t1");
+
+        // Rotate the token, then force a reconnect via a premature end.
+        token = "t2";
+        client.conns[0].close();
+        async.flushMicrotasks();
+
+        expect(client.calls, 2);
+        // The reconnect picks up the refreshed token.
+        expect(client.requests[1].headers["Authorization"], "Bearer t2");
+
+        sub.cancel();
+      });
+    });
+
+    test("treats a connectionParams failure as a transient drop", () {
+      fakeAsync((async) {
+        var failNext = true;
+        final client = _ReconnectClient();
+        final link = SseLink(
+          "https://example.com/graphql/stream",
+          httpClient: client,
+          retryWait: _immediate,
+          connectionParams: () async {
+            if (failNext) {
+              failNext = false;
+              throw http.ClientException("token fetch failed");
+            }
+            return null;
+          },
+        );
+
+        Object? error;
+        var done = false;
+        link.request(_subscription()).listen(
+              (_) {},
+              onError: (Object e) => error = e,
+              onDone: () => done = true,
+            );
+
+        async.flushMicrotasks();
+
+        // The first attempt threw before sending, then retried and connected.
+        expect(client.calls, 1);
+        expect(error, isNull);
+
+        client.conns[0].add(_utf8("event: complete\n\n"));
+        async.flushMicrotasks();
+        expect(done, isTrue);
+        expect(error, isNull);
       });
     });
   });

@@ -27,6 +27,19 @@ typedef RetryWait = Future<void> Function(int retries);
 /// See [SseLink.shouldRetryDefault] for the default.
 typedef ShouldRetry = bool Function(Object error);
 
+/// Produces extra HTTP headers to attach to each (re)connection.
+///
+/// Called on **every** connection attempt — including reconnects — so the
+/// returned headers are always fresh. This is the SSE analog of
+/// `gql_websocket_link`'s `connectionParams`: because SSE authenticates over
+/// HTTP headers rather than a `connection_init` payload, it returns headers.
+/// Use it to supply a bearer token that may have been refreshed since the
+/// subscription first opened. The result may be computed asynchronously.
+///
+/// Returned headers take precedence over both the link's `defaultHeaders`
+/// and the request's `HttpLinkHeaders` context entry.
+typedef ConnectionParams = FutureOr<Map<String, String>?> Function();
+
 /// A terminating [Link] that carries GraphQL subscriptions over
 /// Server-Sent Events using the graphql-sse
 /// ["distinct connections" mode](https://github.com/enisdenjo/graphql-sse/blob/master/PROTOCOL.md#distinct-connections-mode).
@@ -72,6 +85,8 @@ typedef ShouldRetry = bool Function(Object error);
 ///   [shouldRetryDefault].
 /// - [retryHealthyThreshold] — once a connection has stayed open at least
 ///   this long, the next drop resets the backoff to its first step.
+/// - [connectionParams] — resolves extra headers (e.g. a refreshed auth
+///   token) on every (re)connection.
 ///
 /// An explicit `event: complete` is always terminal and never triggers a
 /// reconnect. Deterministic failures (HTTP 4xx, malformed payloads,
@@ -116,6 +131,11 @@ class SseLink extends Link {
   /// is treated as "the first" and resets [retryWait]'s `retries` to `0`.
   final Duration retryHealthyThreshold;
 
+  /// Optional per-connection header provider, resolved fresh on every
+  /// (re)connection. Its headers override [defaultHeaders] and the request's
+  /// context headers — use it to refresh an auth token across reconnects.
+  final ConnectionParams? connectionParams;
+
   final http.Client _httpClient;
   final bool _ownsClient;
   final Set<_SseSubscription> _active = <_SseSubscription>{};
@@ -128,7 +148,9 @@ class SseLink extends Link {
   /// when [dispose] is called.
   ///
   /// The reconnection behaviour is tuned via [retryAttempts], [retryWait],
-  /// [shouldRetry] and [retryHealthyThreshold]; see the class docs.
+  /// [shouldRetry] and [retryHealthyThreshold]; see the class docs. Pass
+  /// [connectionParams] to inject headers (e.g. a refreshed auth token) on
+  /// every (re)connection.
   SseLink(
     String uri, {
     this.defaultHeaders = const {},
@@ -139,6 +161,7 @@ class SseLink extends Link {
     RetryWait? retryWait,
     ShouldRetry? shouldRetry,
     this.retryHealthyThreshold = const Duration(seconds: 30),
+    this.connectionParams,
   })  : uri = Uri.parse(uri),
         _httpClient = httpClient ?? http.Client(),
         _ownsClient = httpClient == null,
@@ -327,6 +350,26 @@ class _SseSubscription {
     if (_closed || _connecting) return;
     _connecting = true;
 
+    // Resolve per-connection headers first; a failure here (e.g. a token
+    // refresh that could not reach its endpoint) is transient by default and
+    // is classified by [SseLink.shouldRetry] on its raw error.
+    Map<String, String> dynamicHeaders = const <String, String>{};
+    try {
+      final params = await _link.connectionParams?.call();
+      if (params != null) {
+        dynamicHeaders = params;
+      }
+    } catch (error) {
+      _connecting = false;
+      _onDrop(error);
+      return;
+    }
+
+    if (_closed) {
+      _connecting = false;
+      return;
+    }
+
     final http.Request httpRequest;
     try {
       httpRequest = http.Request("POST", _link.uri)
@@ -336,6 +379,7 @@ class _SseSubscription {
           "Accept": "text/event-stream",
           ..._link.defaultHeaders,
           ..._link._contextHeaders(_request),
+          ...dynamicHeaders,
         });
     } catch (error, stack) {
       // RequestFormatException / ContextReadException are deterministic.

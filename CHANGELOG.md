@@ -1,3 +1,11 @@
+## 1.0.0-beta.3
+
+- **`connectionParams` callback** — an optional `FutureOr<Map<String, String>?>
+  Function()?` resolved fresh on every (re)connection, letting you inject
+  headers (typically a refreshed auth token) that override `defaultHeaders` and
+  the request's context headers. The SSE analog of `gql_websocket_link`'s
+  `connectionParams`. A failure resolving it is treated as a transient drop.
+
 ## 1.0.0-beta.2
 
 - **Transparent reconnection.** A subscription whose stream drops mid-flight —

@@ -99,6 +99,7 @@ public API is backward compatible; the defaults suit live subscriptions.
 | `retryWait`              | `Future<void> Function(int retries)` | `SseLink.randomizedExponentialBackoff` | Backoff schedule; awaited before each reconnect. `retries` starts at `0` for the first reconnect after a healthy connection. |
 | `shouldRetry`            | `bool Function(Object error)`     | `SseLink.shouldRetryDefault`     | Classifies a transport failure as transient (`true` → reconnect) or deterministic (`false` → propagate). |
 | `retryHealthyThreshold`  | `Duration`                        | `Duration(seconds: 30)`          | Once a connection has stayed open this long, the next drop restarts the backoff from its first step. |
+| `connectionParams`       | `FutureOr<Map<String, String>?> Function()?` | `null`                | Resolves extra HTTP headers on **every** (re)connection. Its headers override `defaultHeaders` and the request's context headers. |
 
 ```dart
 SseLink(
@@ -112,6 +113,28 @@ SseLink(
 
 The default `randomizedExponentialBackoff` starts at a 1s base delay, doubles
 per attempt up to a 30s cap, and adds a random 300ms–3s jitter.
+
+### Refreshing auth on reconnect
+
+Because a reconnect re-issues the original `POST`, headers baked into the
+request (e.g. by an `AuthLink`) are **not** refreshed — a bearer token that
+expired mid-subscription would be replayed stale. Use `connectionParams` to
+resolve headers fresh on every attempt instead:
+
+```dart
+SseLink(
+  "https://example.com/graphql/stream",
+  connectionParams: () async => {
+    "Authorization": "Bearer ${await tokenStore.currentAccessToken()}",
+  },
+);
+```
+
+`connectionParams` is the SSE analog of `gql_websocket_link`'s parameter of the
+same name; since SSE authenticates over HTTP headers rather than a
+`connection_init` payload, it returns headers. A failure while resolving them
+(e.g. the token endpoint is unreachable) is treated as a transient drop and
+retried, unless your `shouldRetry` classifies the thrown error as terminal.
 
 > **Non-goal — `Last-Event-ID` resumption.** The distinct-connections mode
 > re-executes the subscription from scratch on every connection, and these
